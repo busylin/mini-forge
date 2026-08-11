@@ -1,0 +1,63 @@
+seed: 42
+device: auto
+paths:
+  raw_dir: data/raw/ml-1m
+  processed_dir: data/processed
+  artifact_dir: artifacts
+data:
+  positive_rating: 4
+  min_user_interactions: 10
+  min_item_interactions: 5
+  min_history: 5
+  max_history: 50
+  stride: 1
+  i2i_window: 5
+content:
+  encoder: sentence-transformers/all-MiniLM-L6-v2
+  batch_size: 128
+  max_length: 64
+  normalize: true
+rqvae:
+  input_dim: 384
+  hidden_dim: 256
+  latent_dim: 64
+  num_codebooks: 3
+  codebook_size: 64
+  commitment_beta: 0.25
+  i2i_weight: 0.1
+  temperature: 0.07
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  batch_size: 256
+  pair_batch_size: 256
+  epochs: 150
+  warmup_epochs: 10
+  early_stop_patience: 20
+  gradient_clip: 1.0
+  validation_ratio: 0.1
+  kmeans_iterations: 30
+generator:
+  d_model: 256
+  d_ff: 1024
+  d_kv: 64
+  encoder_layers: 4
+  decoder_layers: 4
+  heads: 4
+  dropout: 0.1
+  batch_size: 16
+  gradient_accumulation: 8
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  epochs: 10
+  warmup_ratio: 0.05
+  label_smoothing: 0.1
+  early_stop_patience: 3
+  gradient_clip: 1.0
+  num_workers: 2
+  validation_ranking: true
+inference:
+  num_beams: 20
+  top_k: [5, 10, 20]
+  batch_size: 32
+  remove_seen_items: true
+
