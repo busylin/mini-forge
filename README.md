@@ -8,7 +8,8 @@ MovieLens 1M（用户自行下载）
   → MiniLM 电影内容向量
   → 三级 RQ-VAE 残差量化
   → 唯一 Semantic ID
-  → Mini-T5 自回归预测
+  → 用户属性前缀 + 历史 SID 序列
+  → Mini-T5 自回归预测下一部电影的 SID
   → Trie 约束 Beam Search
   → SID 回表与 Item 级评测
 ```
@@ -24,6 +25,7 @@ MovieLens 1M（用户自行下载）
 - 三级 RQ-VAE、K-means 码本初始化及内容/协同联合训练；
 - SID 碰撞编号、唯一回表和码本质量评估；
 - 从头初始化的小型 T5，不下载 T5 预训练权重；
+- 编码 UserID、Gender、Age、Occupation，并使用结构化用户前缀；
 - 有效 SID Trie 约束 Beam Search，并支持去除已看电影；
 - HR、NDCG、MRR、Catalog Coverage 和生成质量指标；
 - 不依赖 MovieLens 和外部模型的 CPU smoke 测试。
@@ -118,6 +120,38 @@ mini-forge --set rqvae.codebook_size=32 train-rqvae
 mini-forge --set generator.batch_size=8 train-generator
 mini-forge --set inference.num_beams=10 eval-generator --split validation
 ```
+
+## 用户信息与训练数据
+
+`prepare` 读取 `ratings.dat`、`movies.dat` 和 `users.dat`，输出包含四类用户字段的 `train.jsonl`、`validation.jsonl`、`test.jsonl`，以及 `users.csv`。下面是格式示例（非随仓库发布的真实用户数据）：
+
+```json
+{"user_id": 11, "gender": "M", "age": "18", "occupation": "15", "history": [101, 102], "target": 103}
+```
+
+- 先过滤正反馈并执行 K-core，再按每位用户的交互时间排序。
+- 最后两个物品分别作为验证目标和测试目标；训练样本仅从之前的交互构造滑动前缀。
+- 默认历史最短5部、最长50部；测试历史包含验证物品，但不包含测试目标。
+- `age` 和 `occupation` 保留 MovieLens 的年龄组、职业类别编码，并不是精确年龄或职业名称；ZIP code 不输入模型。
+- 合成 smoke 数据没有 `users.dat` 时，Gender/Age/Occupation 使用 `UNK`，UserID 仍保留。若提供了 `users.dat` 却缺少某个保留用户的记录，预处理会明确报错。
+
+JSONL 中的 `history`、`target` 保存电影 ID。`SIDDataset` 在读取时通过 `movie_to_sid.json` 将其转换为 SID，实际编码器输入为：
+
+```text
+<USER>
+<USER_ID_11> <USER_GENDER_M> <USER_AGE_18> <USER_OCCUPATION_15>
+</USER>
+<ITEM_LIST>
+<L1_4> <L2_42> <L3_57> <C_0>
+<L1_59> <L2_28> <L3_52> <C_0>
+</ITEM_LIST>
+```
+
+每组四个 SID token 对应一部电影，按历史顺序拼接；换行仅便于展示，历史物品之间不再添加旧的 `<ITEM>` token。目标标签仍是下一部电影的 SID 加 `<EOS>`，不包含用户前缀。推荐推理时只提供用户属性和历史，目标仅用于评估。
+
+用户字段和 SID 都作为原子 token 映射为整数 ID，不使用自然语言分词器。词表从 SID 映射及训练/验证样本的用户字段建立，随 checkpoint 保存，测试时复用。默认 `d_model=256`，全部 token 使用 T5 从零学习的共享 embedding；用户 token 也位于共享输出词表中，生成时由 SID Trie 排除。词表和参数量随数据变化，不能再按旧版155词、约740万参数固定估算。
+
+当前实现没有新用户 ID 的未知词回退，评测面向同一用户集合的时序切分；不要将其描述为已支持任意未见用户的冷启动推荐。
 
 ## 目录结构
 

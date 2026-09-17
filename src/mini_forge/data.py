@@ -19,9 +19,11 @@ MOVIELENS_URL = "https://files.grouplens.org/datasets/movielens/ml-1m.zip"
 def _looks_like_movielens_1m(raw_dir: Path) -> bool:
     ratings = raw_dir / "ratings.dat"
     movies = raw_dir / "movies.dat"
+    users = raw_dir / "users.dat"
     return (
         ratings.exists()
         and movies.exists()
+        and users.exists()
         and ratings.stat().st_size > 10_000_000
         and movies.stat().st_size > 100_000
     )
@@ -78,6 +80,22 @@ def prepare_movielens(config: dict[str, Any]) -> dict[str, Any]:
         raw_dir / "movies.dat", sep="::", engine="python", encoding="latin-1",
         names=["movie_id", "title", "genres"],
     )
+    users_path = raw_dir / "users.dat"
+    if users_path.exists():
+        users = pd.read_csv(
+            users_path, sep="::", engine="python", encoding="latin-1",
+            names=["user_id", "gender", "age", "occupation", "zip_code"],
+        )
+    else:
+        # Small synthetic fixtures may omit users.dat. Keep their pipeline usable
+        # while making the missing attributes explicit in the generated tokens.
+        users = pd.DataFrame({
+            "user_id": sorted(ratings.user_id.unique()),
+            "gender": "UNK",
+            "age": "UNK",
+            "occupation": "UNK",
+            "zip_code": "UNK",
+        })
     data_cfg = config["data"]
     ratings = ratings[ratings.rating >= data_cfg["positive_rating"]]
     ratings = _k_core(
@@ -94,6 +112,18 @@ def prepare_movielens(config: dict[str, Any]) -> dict[str, Any]:
     min_history = int(data_cfg["min_history"])
     max_history = int(data_cfg["max_history"])
     stride = int(data_cfg["stride"])
+    user_profiles = users.set_index("user_id").to_dict("index")
+
+    def user_fields(user_id: int) -> dict[str, Any]:
+        profile = user_profiles.get(int(user_id))
+        if profile is None:
+            raise ValueError(f"Missing profile for user_id={user_id} in users.dat")
+        return {
+            "user_id": int(user_id),
+            "gender": str(profile["gender"]),
+            "age": str(profile["age"]),
+            "occupation": str(profile["occupation"]),
+        }
 
     for user_id, group in ratings.groupby("user_id", sort=True):
         records = group.sort_values(["timestamp", "movie_id"]).to_dict("records")
@@ -105,23 +135,25 @@ def prepare_movielens(config: dict[str, Any]) -> dict[str, Any]:
             interactions.append({**{key: int(row[key]) for key in ["user_id", "movie_id", "rating", "timestamp"]}, "split": split})
         for target_position in range(min_history, len(train_items), stride):
             train_examples.append({
-                "user_id": int(user_id),
+                **user_fields(int(user_id)),
                 "history": train_items[max(0, target_position - max_history):target_position],
                 "target": train_items[target_position],
             })
         validation_rows.append({
-            "user_id": int(user_id),
+            **user_fields(int(user_id)),
             "history": train_items[-max_history:],
             "target": validation_item,
         })
         test_rows.append({
-            "user_id": int(user_id),
+            **user_fields(int(user_id)),
             "history": (train_items + [validation_item])[-max_history:],
             "target": test_item,
         })
 
     kept_movies = movies[movies.movie_id.isin(ratings.movie_id.unique())].copy().sort_values("movie_id")
+    kept_users = users[users.user_id.isin(ratings.user_id.unique())].copy().sort_values("user_id")
     kept_movies.to_csv(output_dir / "movies.csv", index=False)
+    kept_users.to_csv(output_dir / "users.csv", index=False)
     pd.DataFrame(interactions).to_csv(output_dir / "interactions.csv", index=False)
     write_jsonl(output_dir / "train.jsonl", train_examples)
     write_jsonl(output_dir / "validation.jsonl", validation_rows)

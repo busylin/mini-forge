@@ -25,13 +25,38 @@ from .utils import (
 )
 
 
-SPECIAL_TOKENS = ["<PAD>", "<EOS>", "<ITEM>"]
+SPECIAL_TOKENS = [
+    "<PAD>", "<EOS>",
+    "<USER>", "</USER>",
+    "<ITEM_LIST>", "</ITEM_LIST>",
+]
 
 
-def build_vocabulary(mapping: dict[str, Any]) -> dict[str, int]:
+def _user_tokens(example: dict[str, Any]) -> list[str]:
+    required = ("user_id", "gender", "age", "occupation")
+    missing = [field for field in required if field not in example]
+    if missing:
+        raise ValueError(
+            f"Example is missing user profile fields: {', '.join(missing)}. "
+            "Run the data preparation command again."
+        )
+    return [
+        f"<USER_ID_{example['user_id']}>",
+        f"<USER_GENDER_{example['gender']}>",
+        f"<USER_AGE_{example['age']}>",
+        f"<USER_OCCUPATION_{example['occupation']}>",
+    ]
+
+
+def build_vocabulary(
+    mapping: dict[str, Any],
+    examples: list[dict[str, Any]] | None = None,
+) -> dict[str, int]:
     tokens = set(SPECIAL_TOKENS)
     for value in mapping.values():
         tokens.update(value["tokens"])
+    for example in examples or []:
+        tokens.update(_user_tokens(example))
     ordered = SPECIAL_TOKENS + sorted(tokens - set(SPECIAL_TOKENS))
     return {token: index for index, token in enumerate(ordered)}
 
@@ -41,7 +66,6 @@ class SIDDataset(Dataset):
         self.examples = read_jsonl(path)
         self.mapping = mapping
         self.vocabulary = vocabulary
-        self.item_token = vocabulary["<ITEM>"]
         self.eos_token = vocabulary["<EOS>"]
 
     def __len__(self) -> int:
@@ -49,11 +73,12 @@ class SIDDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         example = self.examples[index]
-        source: list[int] = []
+        source_tokens = ["<USER>", *_user_tokens(example), "</USER>", "<ITEM_LIST>"]
         for movie_id in example["history"]:
             sid = self.mapping[str(movie_id)]["tokens"]
-            source.extend(self.vocabulary[token] for token in sid)
-            source.append(self.item_token)
+            source_tokens.extend(sid)
+        source_tokens.append("</ITEM_LIST>")
+        source = [self.vocabulary[token] for token in source_tokens]
         target = [self.vocabulary[token] for token in self.mapping[str(example["target"])]["tokens"]] + [self.eos_token]
         return {
             "input_ids": source,
@@ -287,9 +312,11 @@ def train_generator(config: dict[str, Any], sid_map_path: str | Path | None = No
     run_name = sid_map_path.parent.name
     output_dir = ensure_dir(artifact_root / "generator" / run_name)
     mapping = read_json(sid_map_path)
-    vocabulary = build_vocabulary(mapping)
-    write_json(output_dir / "vocabulary.json", vocabulary)
     processed = Path(config["paths"]["processed_dir"])
+    train_examples = read_jsonl(processed / "train.jsonl")
+    validation_examples = read_jsonl(processed / "validation.jsonl")
+    vocabulary = build_vocabulary(mapping, train_examples + validation_examples)
+    write_json(output_dir / "vocabulary.json", vocabulary)
     train_dataset = SIDDataset(processed / "train.jsonl", mapping, vocabulary)
     validation_dataset = SIDDataset(processed / "validation.jsonl", mapping, vocabulary)
     collator = SIDCollator()

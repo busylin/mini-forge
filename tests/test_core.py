@@ -7,8 +7,9 @@ from pathlib import Path
 import torch
 
 from mini_forge.data import prepare_movielens
-from mini_forge.generator import TokenTrie, build_vocabulary
+from mini_forge.generator import SIDDataset, TokenTrie, build_vocabulary
 from mini_forge.rqvae import RQVAE
+from mini_forge.utils import read_jsonl, write_jsonl
 
 
 class CoreTests(unittest.TestCase):
@@ -38,6 +39,36 @@ class CoreTests(unittest.TestCase):
             set(trie.allowed([vocabulary["<L1_0>"]])),
             {vocabulary["<L2_1>"], vocabulary["<L2_2>"]},
         )
+
+    def test_structured_user_input(self) -> None:
+        mapping = {
+            "1": {"tokens": ["<L1_4>", "<L2_2>", "<C_0>"]},
+            "2": {"tokens": ["<L1_5>", "<L2_3>", "<C_0>"]},
+        }
+        example = {
+            "user_id": 11, "gender": "M", "age": "18", "occupation": "45",
+            "history": [1, 2], "target": 2,
+        }
+        vocabulary = build_vocabulary(mapping, [example])
+        self.assertEqual(vocabulary["<PAD>"], 0)
+        self.assertEqual(vocabulary["<EOS>"], 1)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "examples.jsonl"
+            write_jsonl(path, [example])
+            row = SIDDataset(path, mapping, vocabulary)[0]
+        reverse = {index: token for token, index in vocabulary.items()}
+        self.assertEqual([reverse[index] for index in row["input_ids"]], [
+            "<USER>", "<USER_ID_11>", "<USER_GENDER_M>", "<USER_AGE_18>",
+            "<USER_OCCUPATION_45>", "</USER>", "<ITEM_LIST>",
+            *mapping["1"]["tokens"], *mapping["2"]["tokens"], "</ITEM_LIST>",
+        ])
+        self.assertEqual([reverse[index] for index in row["labels"]], [
+            *mapping["2"]["tokens"], "<EOS>",
+        ])
+
+    def test_old_examples_require_preparation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "preparation"):
+            build_vocabulary({}, [{"user_id": 1}])
 
     def test_prepare_leave_one_out(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -70,8 +101,20 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(metadata["num_validation_examples"], 2)
             self.assertEqual(metadata["num_test_examples"], 2)
             self.assertEqual(metadata["num_train_examples"], 2)
+            train_path = root / "processed" / "train.jsonl"
+            fallback = read_jsonl(train_path)[0]
+            self.assertEqual(fallback["gender"], "UNK")
+            (raw / "users.dat").write_text(
+                "1::F::18::10::00000\n2::M::25::15::00000\n", encoding="latin-1",
+            )
+            prepare_movielens(config)
+            profile = read_jsonl(train_path)[0]
+            self.assertEqual(profile["user_id"], 1)
+            self.assertEqual(profile["gender"], "F")
+            self.assertEqual(profile["age"], "18")
+            self.assertEqual(profile["occupation"], "10")
+            self.assertTrue((root / "processed" / "users.csv").exists())
 
 
 if __name__ == "__main__":
     unittest.main()
-
